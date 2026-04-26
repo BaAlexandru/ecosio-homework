@@ -26,6 +26,7 @@ Two clarifications:
 - **"Start over with (1)"** means recurse, but visit each URL at most once. Deduplication is on the normalized URL.
 - **"Multithreading"** uses Java 21 virtual threads via `Executors.newVirtualThreadPerTaskExecutor()`. Network-bound work is exactly what virtual threads were built for; classic platform-thread pools would either over-serialize or waste OS resources.
 - **"Output sorted by the link label"** - case-insensitive sort by label, URL as tiebreaker. Output goes to `stdout` and to `crawl-<timestamp>.txt` so a review of the result is possible without re-running.
+
 ## Decisions worth flagging upfront
 
 - **Pure JDK.** No Jsoup, no Apache HttpClient, no OkHttp, no Guava. HTML link extraction is a bounded, ReDoS-safe regex over the response body. HTTP uses `java.net.http.HttpClient` with synchronous `send()` on virtual threads - `sendAsync` is unnecessary in 2025 once virtual threads are in play.
@@ -39,6 +40,8 @@ if (visited.add(normalized)) {
 
 - **Collect every URL, not just `200`s.** A 404, a 500, a PDF - they are still links on the page, and the output records each with its HTTP status. **Recursion** only happens for `2xx + Content-Type: text/html`; everything else is recorded as a leaf node.
 - **Response-size cap via a custom `Flow.Subscriber`.** `HttpResponse.BodySubscribers.limiting(...)` the cap is enforced by a subscriber that tracks running byte count and calls `subscription.cancel()` on overflow. `BodySubscribers.ofString()` would buffer the entire response before any cap check can run.
+- **No body bytes for non-HTML.** A `Content-Type`-driven `BodyHandler` routes HTML responses to `CappedBodySubscriber` and everything else to `DiscardingBodySubscriber`, which cancels the subscription in `onSubscribe`. PDFs, images, and videos cost only a header roundtrip. `BodySubscribers.replacing(...)` and `BodySubscribers.discarding()` do **not** cancel — both drain the body before completing — so a custom subscriber is required.
+- **Per-origin concurrency cap.** A `ConcurrentHashMap<String, Semaphore>` keyed on `scheme://authority` gives each origin its own concurrency budget. A single global cap was correct for single-origin crawls but starved slow subdomains on multi-subdomain sites — fast hosts burned the budget while slow ones queued. `--exclude-subdomains` is enforced upstream by `DomainPolicy.isInScope()`, so the map degrades cleanly to one entry when subdomains are excluded.
 - **Cloudflare fallback.** On `403`/`503`, retry once with a realistic Chrome `User-Agent` + `Accept-Language` + `Sec-Fetch-*` headers. Single retry, no cookies, no JavaScript. The URL is recorded with whichever status finally comes back. `ecosio.com` is currently behind Cloudflare; this is transparent best-effort, not a real bypass.
 - **No `StructuredTaskScope`.** Still preview through JDK 26 (finalizing in JDK 27); the API has churned across previews. Completion is tracked with `AtomicInteger inFlight` + `CountDownLatch done`.
 
@@ -66,12 +69,15 @@ CLI:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `<seed>` | required | Seed URL - `http`/`https` only. |
-| `--max-pages=N` | `500` | Safety cap on pages fetched. |
+| `<seed>` | required | Seed URL — `http`/`https` only. |
+| `--max-pages=N` | `1000` | Safety cap on pages fetched. |
+| `--max-concurrency=N` | `64` | Per-origin in-flight cap (HTTP/2 streams). |
 | `--exclude-subdomains` | off | Tighten same-domain to exact-host. |
-| `--timeout-seconds=N` | `10` | Per-request timeout. |
-| `--max-bytes=N` | `2000000` | Per-response byte cap. |
-| `--output-file=PATH` | `crawl-<ts>.txt` | Where to write the final sorted list. Pass empty to disable. |
+| `--timeout=N` | `15` | Per-request timeout in seconds. |
+| `--max-bytes=N` | `5242880` | Per-response byte cap (5 MiB). |
+| `--output=PATH` | `crawl-<ts>.txt` | Where to write the final sorted list. |
+| `--no-file` | off | Skip file output (stdout only). |
+| `--help`, `-h` | — | Print usage and exit. |
 
 Output line format (sorted by label, case-insensitive):
 
@@ -83,6 +89,22 @@ Output line format (sorted by label, case-insensitive):
 
 The `[<status>]` column is an addition over the literal task spec - it makes "collect every URL regardless of status" verifiable at a glance.
 
+### Performance notes
+
+The crawler is bounded by network I/O, not CPU. Two empirical wins are
+worth calling out:
+
+| Crawl | Wall time |
+|---|---|
+| `https://ecosio.com --max-pages=5000` | ~60 s (3024 entries) |
+| `https://orf.at --max-pages=10000` | ~70 s (10 000 entries, ~15 subdomains) |
+
+The `orf.at` win in particular is dominated by the per-origin semaphore —
+slow subdomains like `kids.orf.at` no longer block fast ones. Body skip
+on non-HTML responses (PDFs, videos, images) gives a second compounding
+win: a video page that would otherwise take 18-22 s now resolves in
+~500 ms.
+
 ## Out of scope
 
 - Automated tests (confirmed with recruiter).
@@ -91,7 +113,7 @@ The `[<status>]` column is an addition over the literal task spec - it makes "co
 
 ## Status
 
-This is commit 0 - README only. See `git log` for phase progression.
+Complete. All six phases shipped; see `git log` for progression and [`DECISIONS.md`](DECISIONS.md) for the rationale behind every load-bearing choice.
 
 ## Legend
 
