@@ -13,6 +13,7 @@ import java.nio.charset.IllegalCharsetNameException;
 import java.nio.charset.StandardCharsets;
 import java.nio.charset.UnsupportedCharsetException;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -23,23 +24,24 @@ public class Crawler {
 
     private static final Pattern CHARSET_IN_CT =
             Pattern.compile("(?i)charset\\s*=\\s*\"?([A-Za-z0-9_\\-]+)\"?");
-    private static final int DEFAULT_CONCURRENCY = 32;
+    private static final int DEFAULT_CONCURRENCY = 64;
 
     private final HttpFetcher fetcher;
     private final DomainPolicy policy;
     private final int maxPages;
-    private final Semaphore concurrencyCap;
+    private final int perOriginCap;
+    private final Map<String, Semaphore> capByOrigin = new ConcurrentHashMap<>();
 
     public Crawler(HttpFetcher fetcher, DomainPolicy policy, int maxPages) {
         this(fetcher, policy, maxPages, DEFAULT_CONCURRENCY);
     }
 
-    public Crawler(HttpFetcher fetcher, DomainPolicy policy, int maxPages, int concurrency) {
-        if (concurrency < 1) throw new IllegalArgumentException("concurrency must be >= 1");
+    public Crawler(HttpFetcher fetcher, DomainPolicy policy, int maxPages, int perOriginConcurrency) {
+        if (perOriginConcurrency < 1) throw new IllegalArgumentException("concurrency must be >= 1");
         this.fetcher = fetcher;
         this.policy = policy;
         this.maxPages = maxPages;
-        this.concurrencyCap = new Semaphore(concurrency);
+        this.perOriginCap = perOriginConcurrency;
     }
 
     public List<Entry> crawl(URI seed) {
@@ -77,8 +79,9 @@ public class Crawler {
                        ExecutorService exec) {
         try {
             FetchResult result;
+            Semaphore cap = capFor(url);
             try {
-                concurrencyCap.acquire();
+                cap.acquire();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
@@ -87,7 +90,7 @@ public class Crawler {
             try {
                 result = fetcher.fetch(url);
             } finally {
-                concurrencyCap.release();
+                cap.release();
             }
 
             // Every URL we reach gets recorded — even non-2xx, even non-HTML.
@@ -152,6 +155,11 @@ public class Crawler {
             }
         }
         return new String(bytes, charset);
+    }
+
+    private Semaphore capFor(URI url) {
+        String origin = url.getScheme() + "://" + url.getAuthority();
+        return capByOrigin.computeIfAbsent(origin, k -> new Semaphore(perOriginCap));
     }
 
 }

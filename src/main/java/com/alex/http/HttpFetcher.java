@@ -6,6 +6,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.Locale;
 
 public final class HttpFetcher {
 
@@ -71,8 +72,15 @@ public final class HttpFetcher {
 
         HttpRequest request = builder.GET().build();
         try {
-            HttpResponse<byte[]> response =
-                    client.send(request, info -> new CappedBodySubscriber(maxBytes));
+            HttpResponse<byte[]> response = client.send(request, info -> {
+                String contentType = info.headers().firstValue("content-type")
+                        .orElse("")
+                        .toLowerCase(Locale.ROOT);
+                return isHtmlish(contentType)
+                        ? new CappedBodySubscriber(maxBytes)
+                        : new DiscardingBodySubscriber();
+            });
+
             String contentType = response.headers()
                     .firstValue("Content-Type").orElse(null);
             return new FetchResult(
@@ -90,5 +98,11 @@ public final class HttpFetcher {
             Thread.currentThread().interrupt();
             return FetchResult.transportFailure(url, "interrupted");
         }
+    }
+
+    private static boolean isHtmlish(String contentType) {
+        int semi = contentType.indexOf(';');
+        String mime = (semi >= 0 ? contentType.substring(0, semi) : contentType).trim();
+        return mime.equals("text/html") || mime.equals("application/xhtml+xml");
     }
 }
