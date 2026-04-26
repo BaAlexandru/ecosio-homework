@@ -6,6 +6,7 @@ import java.net.URISyntaxException;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 
 /**
@@ -33,6 +34,9 @@ import java.util.Set;
 public final class UrlNormalizer {
 
     private static final Set<String> ALLOWED_SCHEMAS = Set.of("http", "https");
+    private static final int MAX_URL_LENGTH = 2_000;
+    private static final Pattern REPEATED_PERCENT_ENCODING =
+            Pattern.compile("%(?:25){3,}");
 
     private UrlNormalizer() {}
 
@@ -89,7 +93,11 @@ public final class UrlNormalizer {
 
         try {
             URI reconstructedUri = new URI(scheme, null, host, port, path, query, null);
-            return Optional.of(reconstructedUri.normalize());
+            URI out = reconstructedUri.normalize();
+            String s = out.toString();
+            if (s.length() > MAX_URL_LENGTH)                         return Optional.empty();
+            if (REPEATED_PERCENT_ENCODING.matcher(s).find())         return Optional.empty();
+            return Optional.of(out);
         } catch (URISyntaxException e) {
             return Optional.empty();
         }

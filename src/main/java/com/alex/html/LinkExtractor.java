@@ -45,6 +45,12 @@ public final class LinkExtractor {
      */
     private static final Pattern WHITESPACE = Pattern.compile("\\s+");
 
+    private static final Pattern STRIP_BLOCK = Pattern.compile(
+            "(?is)<script\\b[^>]*>[\\s\\S]{0,1048576}?</script>"
+                    + "|<style\\b[^>]*>[\\s\\S]{0,1048576}?</style>"
+                    + "|<!--[\\s\\S]{0,1048576}?-->"
+    );
+
     /**
      * Matches the OPENING tag {@code <a ... href="...">} only. The label content
      * and closing {@code </a>} are handled separately in
@@ -77,9 +83,14 @@ public final class LinkExtractor {
     private LinkExtractor() {}
 
     public static List<Link> extract(URI base, String body) {
-        if (base == null || body == null || body.isEmpty()) return List.of();
-        return A_OPEN.matcher(body).results()
-                .map(m -> toLink(base, body, m))
+        if (base == null || body == null || body.isEmpty()) {
+            return List.of();
+        }
+
+        String cleanBody = STRIP_BLOCK.matcher(body).replaceAll("");
+
+        return A_OPEN.matcher(cleanBody).results()
+                .map(m -> toLink(base, cleanBody, m))
                 .flatMap(Optional::stream)
                 .toList();
     }
@@ -127,7 +138,6 @@ public final class LinkExtractor {
         if (raw == null || raw.isEmpty()) {
             return "";
         }
-
         String stripped = HTML_TAG.matcher(raw).replaceAll(" ");
         String decoded = decodeHtmlEntities(stripped);
         return WHITESPACE.matcher(decoded).replaceAll(" ").trim();
